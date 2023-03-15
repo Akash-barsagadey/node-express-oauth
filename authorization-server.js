@@ -1,3 +1,4 @@
+const url = require("url")
 const fs = require("fs")
 const express = require("express")
 const bodyParser = require("body-parser")
@@ -50,114 +51,87 @@ app.use(timeout)
 app.use(bodyParser.json())
 app.use(bodyParser.urlencoded({ extended: true }))
 
-/*
-Your code here
-*/
-
-app.get('/authorize', (req, res) => {
-	// Get the client_id and scopes params from the query object
-	const clientId = req.query.client_id;
-	console.log('req.query.scopes....',req.query.scope)
-	const requestedScopes = req.query.scope ? req.query.scope.split(' ') : [];
-	
-	// Determine if the client ID exists in the clients object
-	if (!clients[clientId]) {
-	  // If the client ID does not exist, respond with a 401 status code and return
-	  res.status(401).send('Invalid client ID');
-	  return;
+app.get("/authorize", (req, res) => {
+	const clientId = req.query.client_id
+	const client = clients[clientId]
+	if (!client) {
+		res.status(401).send("Error: client not authorized")
+		return
 	}
-  
-	console.log('requestedScopes....',requestedScopes)
-	// Get the allowed scopes for the client
-	const allowedScopes = clients[clientId].allowedScopes;
+	if (
+		typeof req.query.scope !== "string" ||
+		!containsAll(client.scopes, req.query.scope.split(" "))
+	) {
+		res.status(401).send("Error: invalid scopes requested")
+		return
+	}
+	const requestId = randomString()
+	requests[requestId] = req.query
+	res.render("login", {
+		client,
+		scope: req.query.scope,
+		requestId,
+	})
+})
 
-	// check if the client ID exists and scopes are allowed
-	if (!clients[clientId] || !containsAll(clients[clientId].scopes, req.query.scope.split(' '))) {
-		return res.status(401).send('Unauthorized');
-	  }
-	  
-	  const requestId = randomString();
-	  requests[requestId] = req.query;
+app.post("/approve", (req, res) => {
+	const { userName, password, requestId } = req.body
+	if (!userName || users[userName] !== password) {
+		res.status(401).send("Error: user not authorized")
+		return
+	}
+	const clientReq = requests[requestId]
+	delete requests[requestId]
+	if (!clientReq) {
+		res.status(401).send("Error: invalid user request")
+		return
+	}
+	const code = randomString()
+	authorizationCodes[code] = { clientReq, userName }
+	const redirectUri = url.parse(clientReq.redirect_uri)
+	redirectUri.query = {
+		code,
+		state: clientReq.state,
+	}
+	res.redirect(url.format(redirectUri))
+})
 
-	  // If the client ID and scopes are valid, render the login page
-	  const client = clients[clientId];
-	  const scope = req.query.scope;
-	  const params = { client, scope, requestId };
-	  res.render('login', params);
-	  //res.status(200).send('Valid client ID and scope');
-  });
-
-  app.post('/approve',(req,res)=>{
-	const { userName, password, requestId} = req.body;
-
-  // Check if the username and password match
-  if (users[userName] !== password) {
-    // If the username and password don't match, respond with a 401 status code and return
-    res.status(401).send('Invalid username or password');
-    return;
-  }
-
-  // Check if the request exists
-  if (!requests[requestId]) {
-    return res.status(401).end();
-  }
-
-  // Assign the request to a local variable and delete it from the requests object
-  var clientRequest = requests[requestId];
-  delete requests[requestId];
-
-
-  // Retain the client request and the userName of the logged in user in authorizationCodes
-  var code = 'rof5ijf';
-  authorizationCodes[code] = {
-    clientReq: clientRequest,
-    userName: userName
-  };
-
-  // Send a redirect response to the client request's redirect URI with the code and state as query params
-  var redirectURI = clientRequest.redirect_uri;
-  var state = clientRequest.state;
-
-  var redirectURL = redirectURI + '?code=' + code + '&state=' + state;
-  res.redirect(redirectURL);
-  })
-
-
-app.post('/token',(req,res)=>{
-	
-	if (!req.headers.authorization) {
-		return res.status(401).send('Unauthorized');
-	  }
-
-	  const authCredentials = decodeAuthCredentials(req.headers.authorization);
-
-  // Check if the client ID and secret match
-//   const client = clients[authCredentials.clientId];
-//   if (client.secret !== authCredentials.clientSecret) {
-//     return res.status(401).send("Invalid client credentials");
-//   }
-
-  // Check if the code exists in the authorizationCodes object
-  const obj = authorizationCodes[req.body.code];
-
-  if (!obj) {
-    return res.status(401).send("Invalid code");
-  }
-
-  // Delete the code from authorizationCodes
-  delete authorizationCodes[req.body.code];
-
-
-  const payload = { userName: obj.userName, scope: obj.clientReq.scope };
-  
-  const signOptions = { algorithm: 'RS256' };
-  const token = jwt.sign(payload, config.privateKey, signOptions);
-
-  // Respond with token
-  res.status(200).json({
-    access_token: token,
-    token_type: 'Bearer'
-  });
+app.post("/token", (req, res) => {
+	let authCredentials = req.headers.authorization
+	if (!authCredentials) {
+		res.status(401).send("Error: not authorized")
+		return
+	}
+	const { clientId, clientSecret } = decodeAuthCredentials(authCredentials)
+	const client = clients[clientId]
+	if (!client || client.clientSecret !== clientSecret) {
+		res.status(401).send("Error: client not authorized")
+		return
+	}
+	const code = req.body.code
+	if (!code || !authorizationCodes[code]) {
+		res.status(401).send("Error: invalid code")
+		return
+	}
+	const { clientReq, userName } = authorizationCodes[code]
+	delete authorizationCodes[code]
+	const token = jwt.sign(
+		{
+			userName,
+			scope: clientReq.scope,
+		},
+		config.privateKey,
+		{
+			algorithm: "RS256",
+			expiresIn: 300,
+			issuer: "http://localhost:" + config.port,
+		}
+	)
+	res.json({
+		access_token: token,
+		token_type: "Bearer",
+		scope: clientReq.scope,
+	})
 })
 
 const server = app.listen(config.port, "localhost", function () {
