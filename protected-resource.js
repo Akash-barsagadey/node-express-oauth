@@ -1,4 +1,5 @@
 const express = require("express")
+const jwt = require('jsonwebtoken');
 const bodyParser = require("body-parser")
 const fs = require("fs")
 const { timeout } = require("./utils")
@@ -31,6 +32,55 @@ app.use(bodyParser.urlencoded({ extended: true }))
 /*
 Your code here
 */
+
+function getUserInfo(req, res) {
+	const userName = req.user.userName;
+	const scopes = req.user.scope.split(' ');
+  
+	const userInfo = {};
+  
+	scopes.forEach(scope => {
+	  const field = scope.slice(12); // remove "permission:" prefix
+	  if (users[userName][field]) {
+		userInfo[field] = users[userName][field];
+	  }
+	});
+  
+	res.json(userInfo);
+  }
+
+app.get('/user-info',(req,res)=>{
+	if (!req.headers.authorization) {
+		res.status(401).send("Error: client unauthorized")
+		return
+	}
+
+	const authToken = req.headers.authorization.slice("bearer ".length)
+	let userInfo = null
+	try {
+		userInfo = jwt.verify(authToken, config.publicKey, {
+			algorithms: ["RS256"],
+		})
+	} catch (e) {
+		res.status(401).send("Error: client unauthorized")
+		return
+	}
+	if (!userInfo) {
+		res.status(401).send("Error: client unauthorized")
+		return
+	}
+
+	const user = users[userInfo.userName]
+	const userWithRestrictedFields = {}
+	const scope = userInfo.scope.split(" ")
+	for (let i = 0; i < scope.length; i++) {
+		const field = scope[i].slice("permission:".length)
+		userWithRestrictedFields[field] = user[field]
+	}
+
+	res.json(userWithRestrictedFields)
+
+})
 
 const server = app.listen(config.port, "localhost", function () {
 	var host = server.address().address
